@@ -28,7 +28,6 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
 
   const tmpPos  = new THREE.Vector3();
   const tmpNrm  = new THREE.Vector3();
-  // Reusable vectors for per-face normal computation
   const vA      = new THREE.Vector3();
   const vB      = new THREE.Vector3();
   const vC      = new THREE.Vector3();
@@ -36,34 +35,72 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   const edge2   = new THREE.Vector3();
   const faceNrm = new THREE.Vector3();
 
-  const REPORT_EVERY = 5000;
+  const QUANT = 1e4;
+  const posKey = (x, y, z) =>
+    `${Math.round(x * QUANT)}_${Math.round(y * QUANT)}_${Math.round(z * QUANT)}`;
+
+  // ── WHY GAPS HAPPEN ───────────────────────────────────────────────────────
+  // The mesh is non-indexed (unrolled): every triangle has its own copy of
+  // each vertex.  At a shared edge two triangles have the same position but
+  // different face normals.  Displacing each copy along its own face normal
+  // moves them to DIFFERENT final positions → crack / gap.
+  //
+  // THE FIX: every copy of the same position must arrive at the exact same
+  // displaced point.  We achieve this by computing a single *smooth* (area-
+  // weighted average) normal per unique position and using that both for the
+  // texture UV lookup and for the displacement direction.  All copies of the
+  // same position then move by the same vector → watertight result.
+  //
+  // The tradeoff is that displaced normals are smooth at hard edges, but the
+  // underlying geometry is still faceted (the subdivision didn't change it),
+  // so printed edges remain sharp.
+
+  // ── Pass 1: accumulate area-weighted face normals per unique position ─────
+  // Map: posKey → { nx, ny, nz } (unnormalised sum)
+  const smoothNrmMap = new Map();
+
+  for (let t = 0; t < count; t += 3) {
+    vA.fromBufferAttribute(posAttr, t);
+    vB.fromBufferAttribute(posAttr, t + 1);
+    vC.fromBufferAttribute(posAttr, t + 2);
+    edge1.subVectors(vB, vA);
+    edge2.subVectors(vC, vA);
+    faceNrm.crossVectors(edge1, edge2); // length = 2× triangle area → natural area weighting
+
+    for (let v = 0; v < 3; v++) {
+      tmpPos.fromBufferAttribute(posAttr, t + v);
+      const k = posKey(tmpPos.x, tmpPos.y, tmpPos.z);
+      const existing = smoothNrmMap.get(k);
+      if (existing) {
+        existing[0] += faceNrm.x;
+        existing[1] += faceNrm.y;
+        existing[2] += faceNrm.z;
+      } else {
+        smoothNrmMap.set(k, [faceNrm.x, faceNrm.y, faceNrm.z]);
+      }
+    }
+  }
+
+  // Normalise each accumulated normal
+  smoothNrmMap.forEach((n) => {
+    const len = Math.sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]) || 1;
+    n[0] /= len; n[1] /= len; n[2] /= len;
+  });
+
+  // ── Pass 2: sample displacement texture once per unique position ──────────
+  const dispCache = new Map(); // posKey → grey [0, 1]
 
   for (let i = 0; i < count; i++) {
     tmpPos.fromBufferAttribute(posAttr, i);
-    tmpNrm.fromBufferAttribute(nrmAttr, i);
+    const k = posKey(tmpPos.x, tmpPos.y, tmpPos.z);
+    if (dispCache.has(k)) continue;
 
-    // Compute a stable face normal from the triangle's own vertex positions.
-    // The subdivider deduplicates vertices by position only, so shared corner
-    // vertices pick up whichever face's normal happened to be stored first.
-    // For hard-edged meshes (e.g. a cube) this corrupts the stored normals at
-    // edges/corners.  Recomputing from the triangle geometry is always correct
-    // for the flat-shaded STL source data and gives the right normal for both
-    // displacement direction and UV projection.
-    const base = Math.floor(i / 3) * 3;
-    vA.fromBufferAttribute(posAttr, base);
-    vB.fromBufferAttribute(posAttr, base + 1);
-    vC.fromBufferAttribute(posAttr, base + 2);
-    edge1.subVectors(vB, vA);
-    edge2.subVectors(vC, vA);
-    faceNrm.crossVectors(edge1, edge2);
-    // Fall back to the stored vertex normal for degenerate triangles
-    const useNrm = faceNrm.lengthSq() > 1e-10 ? faceNrm.normalize() : tmpNrm;
+    const sn = smoothNrmMap.get(k);
+    tmpNrm.set(sn[0], sn[1], sn[2]);
 
-    const uvResult = computeUV(tmpPos, useNrm, settings.mappingMode, settings, bounds);
-
+    const uvResult = computeUV(tmpPos, tmpNrm, settings.mappingMode, settings, bounds);
     let grey;
     if (uvResult.triplanar) {
-      // Weighted blend of three samples
       grey = 0;
       for (const s of uvResult.samples) {
         grey += sampleBilinear(imageData.data, imgWidth, imgHeight, s.u, s.v) * s.w;
@@ -71,16 +108,32 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     } else {
       grey = sampleBilinear(imageData.data, imgWidth, imgHeight, uvResult.u, uvResult.v);
     }
+    dispCache.set(k, grey);
+  }
 
+  // ── Pass 3: displace every vertex copy by the same vector ─────────────────
+  // Using the smooth normal for the displacement direction ensures all copies
+  // of the same position land at exactly the same 3-D point.
+
+  const REPORT_EVERY = 5000;
+
+  for (let i = 0; i < count; i++) {
+    tmpPos.fromBufferAttribute(posAttr, i);
+    tmpNrm.fromBufferAttribute(nrmAttr, i);
+
+    const k    = posKey(tmpPos.x, tmpPos.y, tmpPos.z);
+    const sn   = smoothNrmMap.get(k);
+    const grey = dispCache.get(k);
     const disp = grey * settings.amplitude;
 
-    newPos[i*3]   = tmpPos.x + useNrm.x * disp;
-    newPos[i*3+1] = tmpPos.y + useNrm.y * disp;
-    newPos[i*3+2] = tmpPos.z + useNrm.z * disp;
+    newPos[i*3]   = tmpPos.x + sn[0] * disp;
+    newPos[i*3+1] = tmpPos.y + sn[1] * disp;
+    newPos[i*3+2] = tmpPos.z + sn[2] * disp;
 
-    newNrm[i*3]   = useNrm.x;
-    newNrm[i*3+1] = useNrm.y;
-    newNrm[i*3+2] = useNrm.z;
+    // Keep per-face normal for shading (recomputed below anyway)
+    newNrm[i*3]   = tmpNrm.x;
+    newNrm[i*3+1] = tmpNrm.y;
+    newNrm[i*3+2] = tmpNrm.z;
 
     if (onProgress && i % REPORT_EVERY === 0) onProgress(i / count);
   }

@@ -3,56 +3,57 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 let renderer, camera, scene, controls, meshGroup, ambientLight, dirLight1, dirLight2, grid;
 let currentMesh = null;
-let gizmoScene, gizmoCamera;
+let axesGroup = null;
 
-const GIZMO_PX     = 90;  // gizmo viewport size in CSS pixels
-const GIZMO_MARGIN = 14;
-
-function buildGizmo() {
-  gizmoScene  = new THREE.Scene();
-  gizmoCamera = new THREE.OrthographicCamera(-1.6, 1.6, 1.6, -1.6, 0.1, 10);
-  gizmoCamera.position.set(0, 0, 3);
+// Build a labelled coordinate axes indicator scaled to `size`.
+// X = red, Y = green, Z = blue (up).
+function buildAxesIndicator(size) {
+  const group = new THREE.Group();
 
   const addAxis = (dir, hex, label) => {
-    // Shaft line
-    const shaft = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(0, 0, 0),
-      dir.clone().multiplyScalar(0.78),
-    ]);
-    gizmoScene.add(new THREE.Line(
-      shaft,
-      new THREE.LineBasicMaterial({ color: hex, depthTest: false }),
-    ));
+    const r = size;
+    // Shaft
+    const pts = [new THREE.Vector3(0, 0, 0), dir.clone().multiplyScalar(r * 0.78)];
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: hex, depthTest: false, transparent: true, opacity: 0.9 }),
+    );
+    line.renderOrder = 999;
+    group.add(line);
 
-    // Arrow-head cone
+    // Cone arrowhead
     const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(0.10, 0.24, 8),
+      new THREE.ConeGeometry(r * 0.07, r * 0.22, 8),
       new THREE.MeshBasicMaterial({ color: hex, depthTest: false }),
     );
-    cone.position.copy(dir.clone().multiplyScalar(0.92));
+    cone.renderOrder = 999;
+    cone.position.copy(dir.clone().multiplyScalar(r * 0.89));
     cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-    gizmoScene.add(cone);
+    group.add(cone);
 
-    // Text label sprite
+    // Text sprite label
     const c   = document.createElement('canvas');
     c.width   = c.height = 64;
     const ctx = c.getContext('2d');
     ctx.fillStyle = `#${hex.toString(16).padStart(6, '0')}`;
-    ctx.font      = 'bold 46px Arial';
+    ctx.font      = 'bold 48px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, 32, 32);
     const sprite = new THREE.Sprite(
       new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }),
     );
-    sprite.position.copy(dir.clone().multiplyScalar(1.26));
-    sprite.scale.set(0.42, 0.42, 1);
-    gizmoScene.add(sprite);
+    sprite.renderOrder = 999;
+    sprite.position.copy(dir.clone().multiplyScalar(r * 1.18));
+    sprite.scale.set(r * 0.32, r * 0.32, 1);
+    group.add(sprite);
   };
 
-  addAxis(new THREE.Vector3(1, 0, 0), 0xff4040, 'X');
-  addAxis(new THREE.Vector3(0, 1, 0), 0x44dd44, 'Y');
-  addAxis(new THREE.Vector3(0, 0, 1), 0x5599ff, 'Z');
+  addAxis(new THREE.Vector3(1, 0, 0), 0xff3333, 'X');
+  addAxis(new THREE.Vector3(0, 1, 0), 0x33dd55, 'Y');
+  addAxis(new THREE.Vector3(0, 0, 1), 0x4488ff, 'Z');
+
+  return group;
 }
 
 export function initViewer(canvas) {
@@ -69,14 +70,16 @@ export function initViewer(canvas) {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x111114);
 
-  // Grid helper (subtle)
+  // Grid helper — in XY plane (Z-up)
   grid = new THREE.GridHelper(200, 40, 0x222228, 0x1e1e24);
-  grid.position.y = 0;
+  grid.rotation.x = Math.PI / 2;  // rotate to XY plane for Z-up
+  grid.position.z = 0;
   scene.add(grid);
 
-  // Camera
-  camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
-  camera.position.set(0, 80, 120);
+  // Camera — orthographic (parallel projection), Z-up
+  camera = new THREE.OrthographicCamera(-150, 150, 150, -150, -10000, 10000);
+  camera.up.set(0, 0, 1);
+  camera.position.set(120, -200, 100);
   camera.lookAt(0, 0, 0);
 
   // Lights
@@ -101,11 +104,7 @@ export function initViewer(canvas) {
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.minDistance = 1;
-  controls.maxDistance = 3000;
   controls.screenSpacePanning = true;
-
-  buildGizmo();
 
   // Resize observer
   const resizeObserver = new ResizeObserver(() => onResize());
@@ -117,28 +116,7 @@ export function initViewer(canvas) {
     requestAnimationFrame(animate);
     controls.update();
 
-    const cw = renderer.domElement.clientWidth;
-    const ch = renderer.domElement.clientHeight;
-
-    // 1. Main scene — full viewport
-    renderer.setScissorTest(false);
-    renderer.setViewport(0, 0, cw, ch);
     renderer.render(scene, camera);
-
-    // 2. Gizmo overlay — upper-right corner
-    //    WebGL y=0 is at bottom, so upper-right means large y.
-    const gx = cw - GIZMO_PX - GIZMO_MARGIN;
-    const gy = ch - GIZMO_PX - GIZMO_MARGIN;
-    gizmoCamera.quaternion.copy(camera.quaternion);
-    renderer.setScissorTest(true);
-    renderer.setScissor(gx, gy, GIZMO_PX, GIZMO_PX);
-    renderer.setViewport(gx, gy, GIZMO_PX, GIZMO_PX);
-    renderer.autoClear = false;
-    renderer.clearDepth();
-    renderer.render(gizmoScene, gizmoCamera);
-    renderer.autoClear = true;
-    renderer.setScissorTest(false);
-    renderer.setViewport(0, 0, cw, ch);
   })();
 }
 
@@ -147,7 +125,11 @@ function onResize() {
   const w = el.clientWidth;
   const h = el.clientHeight;
   renderer.setSize(w, h, false);
-  camera.aspect = w / h;
+  // Orthographic: keep the frustum half-height, update left/right for new aspect
+  const aspect = w / h;
+  const halfH = camera.top;
+  camera.left   = -halfH * aspect;
+  camera.right  =  halfH * aspect;
   camera.updateProjectionMatrix();
 }
 
@@ -179,17 +161,26 @@ export function loadGeometry(geometry, material) {
   currentMesh.receiveShadow = true;
   meshGroup.add(currentMesh);
 
-  // Position grid at mesh bottom
+  // Position grid at mesh bottom (Z-up: move grid along Z)
   geometry.computeBoundingBox();
   const box = geometry.boundingBox;
-  const centerY = (box.min.y + box.max.y) / 2;
-  grid.position.y = box.min.y - 0.01;
+  const groundZ = box.min.z - 0.01;
+  grid.position.z = groundZ;
 
   // Fit camera
   const sphere = new THREE.Sphere();
   geometry.computeBoundingSphere();
   sphere.copy(geometry.boundingSphere);
   fitCamera(sphere);
+
+  // Place coordinate axes away from the part corner
+  if (axesGroup) scene.remove(axesGroup);
+  const axisSize = sphere.radius * 0.30;
+  axesGroup = buildAxesIndicator(axisSize);
+  // Offset from the bounding box corner by ~1 axis-length so it doesn't overlap the mesh
+  const axisPad = axisSize * 1.8;
+  axesGroup.position.set(box.min.x - axisPad, box.min.y - axisPad, groundZ);
+  scene.add(axesGroup);
 }
 
 /**
@@ -215,15 +206,26 @@ export function setMeshMaterial(material) {
 export function getGrid() { return grid; }
 
 function fitCamera(sphere) {
-  const fov = THREE.MathUtils.degToRad(camera.fov);
-  const dist = (sphere.radius * 2.2) / Math.tan(fov / 2);
-  const dir = camera.position.clone().sub(controls.target).normalize();
-  controls.target.copy(sphere.center);
-  camera.position.copy(sphere.center).addScaledVector(dir, dist);
-  controls.update();
-  camera.near = dist * 0.001;
-  camera.far  = dist * 10;
+  const sz = renderer.getSize(new THREE.Vector2());
+  const aspect = sz.x / sz.y;
+  const halfH = sphere.radius * 1.4;
+
+  camera.left   = -halfH * aspect;
+  camera.right  =  halfH * aspect;
+  camera.top    =  halfH;
+  camera.bottom = -halfH;
+  camera.near   = -sphere.radius * 200;
+  camera.far    =  sphere.radius * 200;
+  camera.zoom   = 1;
   camera.updateProjectionMatrix();
+
+  // Isometric-ish view from front-right-above in Z-up space
+  const dir = new THREE.Vector3(0.6, -1.2, 0.8).normalize();
+  controls.target.copy(sphere.center);
+  camera.position.copy(sphere.center).addScaledVector(dir, halfH * 4);
+  camera.up.set(0, 0, 1);
+  camera.lookAt(sphere.center);
+  controls.update();
 }
 
 export function getRenderer() { return renderer; }

@@ -51,12 +51,12 @@ export function computeUV(pos, normal, mode, settings, bounds) {
     }
 
     case MODE_CYLINDRICAL: {
-      // Wrap around Y axis (vertical axis after Z-up → Y-up rotation)
+      // Z is up: wrap around Z axis, height along Z
       const rx = pos.x - center.x;
-      const rz = pos.z - center.z;
-      const theta = Math.atan2(rz, rx);              // [-PI, PI]
+      const ry = pos.y - center.y;
+      const theta = Math.atan2(ry, rx);              // [-PI, PI]
       u = (theta / TWO_PI) + 0.5;                    // [0, 1]
-      v = (pos.y - min.y) / Math.max(size.y, 1e-6);
+      v = (pos.z - min.z) / Math.max(size.z, 1e-6);
       break;
     }
 
@@ -65,8 +65,8 @@ export function computeUV(pos, normal, mode, settings, bounds) {
       const ry = pos.y - center.y;
       const rz = pos.z - center.z;
       const r  = Math.sqrt(rx*rx + ry*ry + rz*rz);
-      const phi   = Math.acos(Math.max(-1, Math.min(1, ry / Math.max(r, 1e-6)))); // [0, PI], Y is up
-      const theta = Math.atan2(rz, rx);              // [-PI, PI]
+      const phi   = Math.acos(Math.max(-1, Math.min(1, rz / Math.max(r, 1e-6)))); // [0, PI], Z is up
+      const theta = Math.atan2(ry, rx);              // [-PI, PI]
       u = (theta / TWO_PI) + 0.5;
       v = phi / Math.PI;
       break;

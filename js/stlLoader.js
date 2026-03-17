@@ -35,8 +35,6 @@ function setupGeometry(geometry) {
   const centre = new THREE.Vector3();
   box.getCenter(centre);
   geometry.translate(-centre.x, -centre.y, -centre.z);
-  // Convert Z-up (3D-print convention) to Y-up (Three.js convention)
-  geometry.rotateX(-Math.PI / 2);
   geometry.computeBoundingBox();
   if (!geometry.attributes.normal) geometry.computeVertexNormals();
 }

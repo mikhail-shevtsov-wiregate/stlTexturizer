@@ -77,16 +77,16 @@ const fragmentShader = /* glsl */`
       return sampleMap((pos.yz - boundsMin.yz) / max(boundsSize.yz, vec2(1e-4)));
 
     } else if (mappingMode == 3) {
-      // Cylindrical around Y (vertical axis after Z-up → Y-up rotation)
-      float u = atan(rel.z, rel.x) / TWO_PI + 0.5;
-      float v = (pos.y - boundsMin.y) / max(boundsSize.y, 1e-4);
+      // Cylindrical around Z axis (Z is up)
+      float u = atan(rel.y, rel.x) / TWO_PI + 0.5;
+      float v = (pos.z - boundsMin.z) / max(boundsSize.z, 1e-4);
       return sampleMap(vec2(u, v));
 
     } else if (mappingMode == 4) {
-      // Spherical
+      // Spherical — Z is up
       float r     = length(rel);
-      float phi   = acos(clamp(rel.y / max(r, 1e-4), -1.0, 1.0));
-      float theta = atan(rel.z, rel.x);
+      float phi   = acos(clamp(rel.z / max(r, 1e-4), -1.0, 1.0));
+      float theta = atan(rel.y, rel.x);
       return sampleMap(vec2(theta / TWO_PI + 0.5, phi / PI));
 
     } else if (mappingMode == 5) {

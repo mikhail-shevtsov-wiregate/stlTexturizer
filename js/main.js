@@ -15,7 +15,7 @@ let previewMaterial   = null;
 let isExporting       = false;
 
 const settings = {
-  mappingMode:   5,     // Triplanar default — covers all faces of any shape
+  mappingMode:   6,     // Cubic default
   scaleU:        1.0,
   scaleV:        1.0,
   amplitude:     0.5,
@@ -227,6 +227,16 @@ async function handleSTL(file) {
       previewMaterial.dispose();
       previewMaterial = null;
     }
+
+    // Auto-select Brick preset (index 5) on first load
+    const brickIdx = PRESETS.findIndex(p => p.name === 'Brick');
+    if (brickIdx >= 0 && !activeMapEntry) {
+      activeMapEntry = PRESETS[brickIdx];
+      activeMapName.textContent = PRESETS[brickIdx].name;
+      const swatches = document.querySelectorAll('.preset-swatch');
+      swatches.forEach((s, i) => s.classList.toggle('active', i === brickIdx));
+    }
+    mappingSelect.value = String(settings.mappingMode);
 
     // Show mesh with a default material until a map is selected
     loadGeometry(geometry);

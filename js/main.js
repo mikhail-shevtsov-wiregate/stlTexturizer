@@ -52,6 +52,7 @@ const settings = {
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
 const canvas         = document.getElementById('viewport');
+const brushCursorEl  = document.getElementById('brush-cursor');
 const dropZone       = document.getElementById('drop-zone');
 const dropHint       = document.getElementById('drop-hint');
 const stlFileInput   = document.getElementById('stl-file-input');
@@ -268,6 +269,8 @@ function wireEvents() {
     exclBrushSingleBtn.classList.add('active');
     exclBrushRadiusBtn.classList.remove('active');
     exclRadiusRow.classList.add('hidden');
+    canvas.style.cursor = exclusionTool ? 'crosshair' : '';
+    brushCursorEl.style.display = 'none';
   });
 
   exclBrushRadiusBtn.addEventListener('click', () => {
@@ -275,6 +278,7 @@ function wireEvents() {
     exclBrushRadiusBtn.classList.add('active');
     exclBrushSingleBtn.classList.remove('active');
     if (exclusionTool === 'brush') exclRadiusRow.classList.remove('hidden');
+    if (exclusionTool === 'brush') canvas.style.cursor = 'none';
   });
 
   exclBrushRadiusSlider.addEventListener('input', () => {
@@ -334,6 +338,9 @@ function wireEvents() {
   });
 
   canvas.addEventListener('mousemove', (e) => {
+    if (exclusionTool === 'brush' && brushIsRadius) {
+      updateBrushCursor(e);
+    }
     if (isPainting && exclusionTool === 'brush') {
       paintAt(e);
       return;
@@ -346,6 +353,7 @@ function wireEvents() {
   canvas.addEventListener('mouseleave', () => {
     _lastHoverTriIdx = -1;
     setHoverPreview(null);
+    brushCursorEl.style.display = 'none';
   });
 
   document.addEventListener('mouseup', () => {
@@ -390,10 +398,14 @@ function setExclusionTool(tool) {
   exclRadiusRow.classList.toggle('hidden', !(exclusionTool === 'brush' && brushIsRadius));
   // Show threshold row only while bucket is active
   exclThresholdRow.classList.toggle('hidden', exclusionTool !== 'bucket');
-  canvas.style.cursor = exclusionTool ? 'crosshair' : '';
+  canvas.style.cursor = (exclusionTool === 'brush' && brushIsRadius) ? 'none' : exclusionTool ? 'crosshair' : '';
   // Clear hover preview whenever the tool changes or is deactivated
   _lastHoverTriIdx = -1;
   setHoverPreview(null);
+  // Hide brush cursor if tool deactivated or switched away from radius brush
+  if (!(exclusionTool === 'brush' && brushIsRadius)) {
+    brushCursorEl.style.display = 'none';
+  }
   // Re-enable controls if tool was deactivated mid-paint
   if (!exclusionTool) {
     isPainting = false;
@@ -459,6 +471,46 @@ function refreshExclusionOverlay() {
   exclCount.textContent = selectionMode
     ? `${n.toLocaleString()} face${n === 1 ? '' : 's'} selected`
     : `${n.toLocaleString()} face${n === 1 ? '' : 's'} excluded`;
+}
+
+function updateBrushCursor(e) {
+  if (!brushIsRadius || !currentGeometry) {
+    brushCursorEl.style.display = 'none';
+    return;
+  }
+  const mesh = getCurrentMesh();
+  if (!mesh) { brushCursorEl.style.display = 'none'; return; }
+  _raycaster.setFromCamera(_canvasNDC(e), getCamera());
+  const hits = _raycaster.intersectObject(mesh);
+  if (hits.length === 0) { brushCursorEl.style.display = 'none'; return; }
+
+  const hitPt = hits[0].point;
+  const cam   = getCamera();
+
+  // Offset the hit point by brushRadius along the camera's right axis
+  // then project both to screen space to get pixel-accurate circle size
+  const camRight = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0).normalize();
+  const edgePt   = hitPt.clone().addScaledVector(camRight, brushRadius);
+
+  const rect  = canvas.getBoundingClientRect();
+  const toScreen = (v) => {
+    const c = v.clone().project(cam);
+    return {
+      x: (c.x * 0.5 + 0.5) * rect.width,
+      y: (1 - (c.y * 0.5 + 0.5)) * rect.height,
+    };
+  };
+
+  const sc = toScreen(hitPt);
+  const se = toScreen(edgePt);
+  const screenRadius = Math.sqrt((se.x - sc.x) ** 2 + (se.y - sc.y) ** 2);
+  const diam = screenRadius * 2;
+
+  brushCursorEl.style.display = 'block';
+  brushCursorEl.style.left    = `${rect.left + sc.x - screenRadius}px`;
+  brushCursorEl.style.top     = `${rect.top  + sc.y - screenRadius}px`;
+  brushCursorEl.style.width   = `${diam}px`;
+  brushCursorEl.style.height  = `${diam}px`;
 }
 
 function updateBucketHover(e) {

@@ -66,6 +66,17 @@ main {
 }
 
 /* ── 3-D Viewport section ────────────────────────────────────────────── */
+#brush-cursor {
+  display: none;
+  position: fixed;
+  pointer-events: none;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.5);
+  z-index: 1000;
+  transform: translate(0, 0);
+}
+
 #viewport-section {
   flex: 1 1 0;
   min-width: 0;

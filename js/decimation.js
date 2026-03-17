@@ -18,6 +18,12 @@
  *     Recompute every affected face normal after the hypothetical collapse.
  *     dot(original, new) < 0.2 (~78°) → reject.  Eliminates spikes / pits.
  *
+ * Crease preservation (Garland & Heckbert §3.2):
+ *   Edges where adjacent face normals diverge by more than CREASE_COS receive
+ *   high-weight penalty planes added to both endpoint quadrics.  This raises
+ *   the QEM cost of any collapse that would move a vertex off a sharp feature,
+ *   ensuring smooth regions are decimated first while creases are kept intact.
+ *
  * @param {THREE.BufferGeometry} geometry        non-indexed input
  * @param {number}               targetTriangles desired output face count
  * @param {function}             [onProgress]    callback(0–1)
@@ -26,8 +32,10 @@
 
 import * as THREE from 'three';
 
-const QUANT    = 1e4;
-const FLIP_DOT = 0.2; // cos ~78° — reject collapse if new normal deviates more
+const QUANT         = 1e4;
+const FLIP_DOT      = 0.2;  // cos ~78° — reject collapse if new normal deviates more
+const CREASE_COS    = 0.5;  // cos 60° — edges sharper than this are treated as creases
+const CREASE_WEIGHT = 1e4;  // quadric penalty weight for crease edges
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -39,10 +47,17 @@ export function decimate(geometry, targetTriangles, onProgress) {
   // Per-vertex error quadrics (10 doubles = upper triangle of symmetric 4×4)
   const quadrics = new Float64Array(vertCount * 10);
   initQuadrics(quadrics, positions, faces, faceCount);
+  addCreaseQuadrics(quadrics, positions, faces, faceCount);
 
   // Vertex → set of incident face indices
   const vertFaces  = buildAdjacency(faces, faceCount, vertCount);
   const active     = new Uint8Array(vertCount).fill(1);
+  // Per-vertex version counter: incremented whenever a vertex's quadric or
+  // position changes.  Heap entries carry the versions at push time; any
+  // entry whose versions no longer match is stale and is skipped.  This
+  // prevents old low-cost entries (computed before a crease-quadric merge)
+  // from firing after the vertex has been updated to a higher-cost state.
+  const version    = new Uint32Array(vertCount);
   let   activeFaces = faceCount;
 
   // Seed min-heap with one entry per unique edge
@@ -54,7 +69,7 @@ export function decimate(geometry, targetTriangles, onProgress) {
       const v1 = faces[f * 3 + e];
       const v2 = faces[f * 3 + ((e + 1) % 3)];
       const ek = v1 < v2 ? `${v1}:${v2}` : `${v2}:${v1}`;
-      if (!seedSeen.has(ek)) { seedSeen.add(ek); pushEdge(heap, quadrics, positions, v1, v2); }
+      if (!seedSeen.has(ek)) { seedSeen.add(ek); pushEdge(heap, quadrics, positions, version, v1, v2); }
     }
   }
   seedSeen.clear();
@@ -63,10 +78,13 @@ export function decimate(geometry, targetTriangles, onProgress) {
   let   lastProg  = 0;
 
   while (activeFaces > targetTriangles && heap.size() > 0) {
-    const { v1, v2, px, py, pz } = heap.pop();
+    const { v1, v2, ver1, ver2, px, py, pz } = heap.pop();
 
     // Stale-entry checks (lazy deletion)
     if (!active[v1] || !active[v2]) continue;
+    // Version check: reject if either vertex's quadric/position has changed
+    // since this entry was pushed (catches outdated pre-merge low-cost entries)
+    if (version[v1] !== ver1 || version[v2] !== ver2) continue;
     if (!shareActiveFace(faces, vertFaces, v1, v2)) continue;
 
     // ── Three safety guards ───────────────────────────────────────────────────
@@ -81,6 +99,7 @@ export function decimate(geometry, targetTriangles, onProgress) {
     positions[v1 * 3 + 1] = py;
     positions[v1 * 3 + 2] = pz;
     mergeQuadric(quadrics, v1, v2);
+    version[v1]++;  // v1's quadric and position changed — invalidate old heap entries
 
     for (const f of vertFaces[v2]) {
       if (faces[f * 3] < 0) continue;
@@ -111,7 +130,7 @@ export function decimate(geometry, targetTriangles, onProgress) {
       }
     }
     for (const nb of neighbors) {
-      if (active[nb]) pushEdge(heap, quadrics, positions, v1, nb);
+      if (active[nb]) pushEdge(heap, quadrics, positions, version, v1, nb);
     }
 
     if (onProgress) {
@@ -221,6 +240,82 @@ function faceNormal(ax, ay, az, bx, by, bz, cx, cy, cz) {
 // ── Quadric helpers ──────────────────────────────────────────────────────────
 // Symmetric 4×4 quadric stored as 10 upper-triangle values per vertex.
 
+// ── Crease-edge quadric preservation (Garland & Heckbert §3.2) ─────────────
+// For each interior edge whose two adjacent faces form a dihedral angle sharper
+// than CREASE_COS, inject two penalty planes into both endpoint vertices.
+// Each penalty plane is perpendicular to one adjacent face and passes through
+// the crease edge, constraining the vertex to stay on the crease line.
+// The high CREASE_WEIGHT ensures these edges have far higher QEM cost than
+// smooth-surface edges and are therefore collapsed last (or not at all).
+
+function addCreaseQuadrics(quadrics, positions, faces, faceCount) {
+  // Build edge → [face, face] map
+  const edgeToFaces = new Map();
+  for (let f = 0; f < faceCount; f++) {
+    if (faces[f * 3] < 0) continue;
+    for (let e = 0; e < 3; e++) {
+      const va = faces[f * 3 + e];
+      const vb = faces[f * 3 + ((e + 1) % 3)];
+      const key = va < vb ? `${va}:${vb}` : `${vb}:${va}`;
+      let arr = edgeToFaces.get(key);
+      if (!arr) { arr = []; edgeToFaces.set(key, arr); }
+      arr.push(f);
+    }
+  }
+
+  const sqrtW = Math.sqrt(CREASE_WEIGHT);
+
+  for (const [key, flist] of edgeToFaces) {
+    if (flist.length !== 2) continue; // open boundary or non-manifold — skip
+
+    const f0 = flist[0], f1 = flist[1];
+    const v0a = faces[f0*3], v0b = faces[f0*3+1], v0c = faces[f0*3+2];
+    const v1a = faces[f1*3], v1b = faces[f1*3+1], v1c = faces[f1*3+2];
+
+    const [n0x, n0y, n0z] = faceNormal(
+      positions[v0a*3], positions[v0a*3+1], positions[v0a*3+2],
+      positions[v0b*3], positions[v0b*3+1], positions[v0b*3+2],
+      positions[v0c*3], positions[v0c*3+1], positions[v0c*3+2]
+    );
+    const [n1x, n1y, n1z] = faceNormal(
+      positions[v1a*3], positions[v1a*3+1], positions[v1a*3+2],
+      positions[v1b*3], positions[v1b*3+1], positions[v1b*3+2],
+      positions[v1c*3], positions[v1c*3+1], positions[v1c*3+2]
+    );
+
+    if (n0x*n1x + n0y*n1y + n0z*n1z >= CREASE_COS) continue; // smooth — skip
+
+    // Resolve the two vertex indices from the key string
+    const colon = key.indexOf(':');
+    const va = parseInt(key.slice(0, colon));
+    const vb = parseInt(key.slice(colon + 1));
+
+    // Normalised edge direction
+    const ex = positions[vb*3]   - positions[va*3];
+    const ey = positions[vb*3+1] - positions[va*3+1];
+    const ez = positions[vb*3+2] - positions[va*3+2];
+    const elen = Math.sqrt(ex*ex + ey*ey + ez*ez) || 1;
+    const edx = ex / elen, edy = ey / elen, edz = ez / elen;
+
+    // Add one penalty plane per adjacent face-normal
+    for (const [nx, ny, nz] of [[n0x, n0y, n0z], [n1x, n1y, n1z]]) {
+      // Penalty plane normal = normalize(face_normal × edge_dir)
+      // This plane contains the edge and is perpendicular to the face,
+      // so it constrains the vertex to lie on the crease line.
+      let px = ny*edz - nz*edy;
+      let py = nz*edx - nx*edz;
+      let pz = nx*edy - ny*edx;
+      const plen = Math.sqrt(px*px + py*py + pz*pz);
+      if (plen < 1e-10) continue; // edge parallel to face normal — degenerate
+      px /= plen; py /= plen; pz /= plen;
+      const d = -(px*positions[va*3] + py*positions[va*3+1] + pz*positions[va*3+2]);
+      // Scale by sqrtW: addPlaneQ accumulates (a²,ab,…) so scaling inputs by √w yields w×(a²,ab,…)
+      addPlaneQ(quadrics, va, px*sqrtW, py*sqrtW, pz*sqrtW, d*sqrtW);
+      addPlaneQ(quadrics, vb, px*sqrtW, py*sqrtW, pz*sqrtW, d*sqrtW);
+    }
+  }
+}
+
 function initQuadrics(quadrics, positions, faces, faceCount) {
   for (let f = 0; f < faceCount; f++) {
     if (faces[f * 3] < 0) continue;
@@ -286,7 +381,7 @@ function solveQ(q, v1, v2) {
   return true;
 }
 
-function pushEdge(heap, quadrics, positions, v1, v2) {
+function pushEdge(heap, quadrics, positions, version, v1, v2) {
   let px, py, pz;
 
   if (solveQ(quadrics, v1, v2)) {
@@ -304,7 +399,8 @@ function pushEdge(heap, quadrics, positions, v1, v2) {
   }
 
   const cost = evalQSum(quadrics, v1, v2, px, py, pz);
-  heap.push({ cost, v1, v2, px, py, pz });
+  // Snapshot both vertices' versions so the pop-side check can detect staleness
+  heap.push({ cost, v1, v2, ver1: version[v1], ver2: version[v2], px, py, pz });
 }
 
 // ── Indexed <-> Non-indexed conversion ──────────────────────────────────────

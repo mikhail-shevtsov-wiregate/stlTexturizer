@@ -339,19 +339,24 @@ function _buildWireframe(geometry) {
     wireframeLines = null;
   }
 
-  // EdgesGeometry gives one segment per unique triangle edge
-  const edgesGeo = new THREE.EdgesGeometry(geometry, 1);
-
-  // Convert to LineSegmentsGeometry (required by LineMaterial / LineSegments2)
-  const lsGeo = new LineSegmentsGeometry().fromEdgesGeometry(edgesGeo);
-  edgesGeo.dispose();
+  // WireframeGeometry gives every triangle edge; EdgesGeometry skips edges
+  // between near-coplanar faces so large flat STL regions lose their grid lines.
+  const wireGeo = new THREE.WireframeGeometry(geometry);
+  const lsGeo = new LineSegmentsGeometry();
+  lsGeo.setPositions(wireGeo.attributes.position.array);
+  wireGeo.dispose();
 
   const lsMat = new LineMaterial({
     color: 0xffffff,
-    opacity: 0.75,
+    opacity: 0.65,
     transparent: true,
-    linewidth: 1.5,          // pixels — works on all desktop GPUs
+    linewidth: 1.2,
     depthTest: true,
+    // Pull lines slightly in front so they beat the base mesh AND the
+    // exclusion overlay (polygonOffsetFactor -1,-1) in the depth test.
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
     resolution: new THREE.Vector2(
       renderer.domElement.width  * renderer.getPixelRatio(),
       renderer.domElement.height * renderer.getPixelRatio(),
@@ -359,7 +364,7 @@ function _buildWireframe(geometry) {
   });
 
   wireframeLines = new LineSegments2(lsGeo, lsMat);
-  wireframeLines.renderOrder = 1;
+  wireframeLines.renderOrder = 3;  // draw after base mesh (0), overlays (1-2)
   // Add to meshGroup so it's automatically removed when a new model is loaded
   meshGroup.add(wireframeLines);
 }

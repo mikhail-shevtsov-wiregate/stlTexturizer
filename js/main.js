@@ -490,10 +490,10 @@ function paintAt(e) {
 function refreshExclusionOverlay() {
   if (!currentGeometry) return;
   if (selectionMode) {
-    // Include Only mode: grey out the complement (non-selected faces) so only the
-    // selected faces show the texture preview beneath.
+    // Include Only mode: tint the complement (non-selected faces) with a pastel blue
+    // so the model stays visible against the dark background before any faces are painted.
     const maskGeo = buildExclusionOverlayGeo(currentGeometry, excludedFaces, true);
-    setExclusionOverlay(maskGeo, 0x222222, 0.88);
+    setExclusionOverlay(maskGeo, 0x8ab4d4, 0.96);
   } else {
     setExclusionOverlay(buildExclusionOverlayGeo(currentGeometry, excludedFaces), 0xff6600);
   }

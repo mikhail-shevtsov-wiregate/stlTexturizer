@@ -569,9 +569,26 @@ function buildOutput(positions, faces, faceCount) {
     }
   }
 
+  // Compute exact per-face normals from the final positions so winding order
+  // always agrees with the stored normals (computeVertexNormals averages across
+  // shared positions and can flip normals on excluded surfaces).
+  const nrmArray = new Float32Array(posArray.length);
+  for (let i = 0; i < posArray.length; i += 9) {
+    const ax = posArray[i],   ay = posArray[i+1], az = posArray[i+2];
+    const bx = posArray[i+3], by = posArray[i+4], bz = posArray[i+5];
+    const cx = posArray[i+6], cy = posArray[i+7], cz = posArray[i+8];
+    const ux = bx-ax, uy = by-ay, uz = bz-az;
+    const vx = cx-ax, vy = cy-ay, vz = cz-az;
+    const nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
+    const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    nrmArray[i]   = nrmArray[i+3] = nrmArray[i+6] = nx / len;
+    nrmArray[i+1] = nrmArray[i+4] = nrmArray[i+7] = ny / len;
+    nrmArray[i+2] = nrmArray[i+5] = nrmArray[i+8] = nz / len;
+  }
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-  geo.computeVertexNormals();
+  geo.setAttribute('normal',   new THREE.BufferAttribute(nrmArray, 3));
   return geo;
 }
 

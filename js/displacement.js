@@ -64,8 +64,19 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   const maskedFracMap = new Map();
 
   // Optional per-vertex exclusion weights threaded through by subdivision.js.
-  // A face's user-exclusion flag = average of its 3 vertex weights > 0.5.
+  // A face's user-exclusion flag = average of its 3 vertex weights > 0.99.
   const ewAttr = geometry.attributes.excludeWeight || null;
+  // Per-face user-exclusion flag: stored separately from maskedFracMap so that
+  // user-excluded faces do NOT bleed reduced displacement into adjacent faces
+  // via shared vertices (maskedFracMap is only for angle-based blending).
+  const userExcludedFaces = ewAttr ? new Uint8Array(count / 3) : null;
+  // Positions that belong to at least one user-excluded face.  Any included-face
+  // vertex whose original position is in this set sits on the seam boundary; we
+  // pin it to zero displacement so both sides of the seam end up at the same
+  // final position.  Without this the mesh has an open crack at the mask
+  // boundary, which causes the QEM decimator to treat the excluded patch as an
+  // isolated open-mesh island and collapse it to nothing (missing triangles).
+  const excludedPosSet = ewAttr ? new Set() : null;
 
   for (let t = 0; t < count; t += 3) {
     vA.fromBufferAttribute(posAttr, t);
@@ -90,11 +101,17 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     const userExcluded = ewAttr
       ? (ewAttr.getX(t) + ewAttr.getX(t + 1) + ewAttr.getX(t + 2)) / 3 > 0.99
       : false;
-    const faceMasked = angleMasked || userExcluded;
+    // maskedFracMap is ONLY used for angle-based blending at surface boundaries.
+    // User exclusion is tracked per-face in userExcludedFaces and applied
+    // directly in Pass 3, so excluded faces don't reduce displacement on their
+    // neighbours through shared boundary vertices.
+    const faceMasked = angleMasked;
+    if (userExcluded && userExcludedFaces) userExcludedFaces[t / 3] = 1;
 
     for (let v = 0; v < 3; v++) {
       tmpPos.fromBufferAttribute(posAttr, t + v);
       const k = posKey(tmpPos.x, tmpPos.y, tmpPos.z);
+      if (userExcluded && excludedPosSet) excludedPosSet.add(k);
       const existing = smoothNrmMap.get(k);
       if (existing) {
         existing[0] += faceNrm.x;
@@ -157,12 +174,16 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     const sn   = smoothNrmMap.get(k);
     const grey = dispCache.get(k);
 
-    // Smooth blend: displacement scaled by the unmasked fraction of surrounding
-    // face area. Boundary vertices (shared by masked + unmasked faces) get a
-    // proportionally reduced displacement instead of a hard on/off cutoff.
+    // User-excluded faces get zero displacement; only angle-based masking uses
+    // the smooth per-vertex blend so neighbours are never unintentionally dimmed.
+    const isFaceExcluded = userExcludedFaces && userExcludedFaces[Math.floor(i / 3)];
+    // Pin included-face vertices that share a position with an excluded face.
+    // This seals the open crack at the mask boundary so the mesh stays watertight
+    // and the decimator cannot collapse the excluded patch to zero faces.
+    const isSealedBoundary = !isFaceExcluded && excludedPosSet && excludedPosSet.has(k);
     const mf         = maskedFracMap.get(k) || [0, 1];
     const maskedFrac = mf[1] > 0 ? mf[0] / mf[1] : 0;
-    const disp = (1 - maskedFrac) * grey * settings.amplitude;
+    const disp = (isFaceExcluded || isSealedBoundary) ? 0 : (1 - maskedFrac) * grey * settings.amplitude;
 
     const newX = tmpPos.x + sn[0] * disp;
     const newY = tmpPos.y + sn[1] * disp;
@@ -188,11 +209,30 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     if (onProgress && i % REPORT_EVERY === 0) onProgress(i / count);
   }
 
+  // Compute exact per-face normals from the displaced positions.
+  // Using computeVertexNormals() would average across shared positions, which
+  // can flip normals on excluded faces whose neighbours were displaced outward.
+  // A direct cross-product per triangle is unambiguous and matches winding order.
+  const eA = new THREE.Vector3();
+  const eB = new THREE.Vector3();
+  const fn = new THREE.Vector3();
+  for (let t = 0; t < count; t += 3) {
+    const ax = newPos[t*3],   ay = newPos[t*3+1],   az = newPos[t*3+2];
+    const bx = newPos[t*3+3], by = newPos[t*3+4],   bz = newPos[t*3+5];
+    const cx = newPos[t*3+6], cy = newPos[t*3+7],   cz = newPos[t*3+8];
+    eA.set(bx - ax, by - ay, bz - az);
+    eB.set(cx - ax, cy - ay, cz - az);
+    fn.crossVectors(eA, eB).normalize();
+    for (let v = 0; v < 3; v++) {
+      newNrm[(t + v) * 3]     = fn.x;
+      newNrm[(t + v) * 3 + 1] = fn.y;
+      newNrm[(t + v) * 3 + 2] = fn.z;
+    }
+  }
+
   const out = new THREE.BufferGeometry();
   out.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
   out.setAttribute('normal',   new THREE.BufferAttribute(newNrm, 3));
-  // Recompute face normals for correct lighting in exported STL
-  out.computeVertexNormals();
   return out;
 }
 

@@ -16,7 +16,8 @@ import { buildAdjacency, bucketFill,
 
 let currentGeometry   = null;   // original loaded geometry
 let currentBounds     = null;   // bounds of the original geometry
-let activeMapEntry    = null;   // { name, texture, imageData, width, height }
+let currentStlName    = 'model'; // base filename of the loaded STL (no extension)
+let activeMapEntry    = null;   // { name, texture, imageData, width, height, isCustom? }
 let previewMaterial   = null;
 let isExporting       = false;
 let previewDebounce   = null;
@@ -198,6 +199,7 @@ function wireEvents() {
     if (!file) return;
     try {
       activeMapEntry = await loadCustomTexture(file);
+      activeMapEntry.isCustom = true;
       activeMapName.textContent = file.name;
       document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
       updatePreview();
@@ -432,12 +434,28 @@ function _canvasNDC(e) {
   );
 }
 
+// The preview material uses THREE.DoubleSide, so the raycaster can return
+// back-face hits of adjacent triangles that are marginally closer than the
+// intended front-facing triangle.  This helper returns the first hit whose
+// face normal (in world space) points toward the camera ray origin.
+const _normalMatrix = new THREE.Matrix3();
+function getFrontFaceHit(hits, mesh) {
+  if (!hits.length) return null;
+  _normalMatrix.getNormalMatrix(mesh.matrixWorld);
+  for (const hit of hits) {
+    const wn = hit.face.normal.clone().applyMatrix3(_normalMatrix).normalize();
+    if (wn.dot(_raycaster.ray.direction) < 0) return hit;
+  }
+  return hits[0]; // fallback — should not happen with a closed mesh
+}
+
 function pickTriangle(e) {
   const mesh = getCurrentMesh();
   if (!mesh) return -1;
   _raycaster.setFromCamera(_canvasNDC(e), getCamera());
   const hits = _raycaster.intersectObject(mesh);
-  return hits.length > 0 ? hits[0].faceIndex : -1;
+  const hit = getFrontFaceHit(hits, mesh);
+  return hit ? hit.faceIndex : -1;
 }
 
 function paintAt(e) {
@@ -445,9 +463,10 @@ function paintAt(e) {
   if (!mesh) return;
   _raycaster.setFromCamera(_canvasNDC(e), getCamera());
   const hits = _raycaster.intersectObject(mesh);
-  if (hits.length === 0) return;
+  const hit = getFrontFaceHit(hits, mesh);
+  if (!hit) return;
 
-  const triIdx = hits[0].faceIndex;
+  const triIdx = hit.faceIndex;
 
   if (brushIsRadius) {
     const hitPt    = hits[0].point;
@@ -583,6 +602,7 @@ async function handleSTL(file) {
     const { geometry, bounds } = await loadSTLFile(file);
     currentGeometry = geometry;
     currentBounds   = bounds;
+    currentStlName  = file.name.replace(/\.stl$/i, '');
 
     // Dispose old preview material and reset state for the new mesh
     if (previewMaterial) {
@@ -799,13 +819,29 @@ async function handleExport() {
         if (posArr[i] < bottomZ) posArr[i] = bottomZ;
       }
       finalGeometry.attributes.position.needsUpdate = true;
-      finalGeometry.computeVertexNormals();
+      // Recompute normals via cross product so they always match winding order.
+      const pa = finalGeometry.attributes.position.array;
+      const na = finalGeometry.attributes.normal ? finalGeometry.attributes.normal.array : new Float32Array(pa.length);
+      for (let i = 0; i < pa.length; i += 9) {
+        const ux = pa[i+3]-pa[i],   uy = pa[i+4]-pa[i+1], uz = pa[i+5]-pa[i+2];
+        const vx = pa[i+6]-pa[i],   vy = pa[i+7]-pa[i+1], vz = pa[i+8]-pa[i+2];
+        const nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
+        const len = Math.sqrt(nx*nx+ny*ny+nz*nz) || 1;
+        na[i]   = na[i+3] = na[i+6] = nx/len;
+        na[i+1] = na[i+4] = na[i+7] = ny/len;
+        na[i+2] = na[i+5] = na[i+8] = nz/len;
+      }
+      if (!finalGeometry.attributes.normal) finalGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(na, 3));
+      else finalGeometry.attributes.normal.needsUpdate = true;
     }
 
     setProgress(0.97, 'Writing STL…');
     await yieldFrame();
 
-    exportSTL(finalGeometry, 'textured.stl');
+    const texLabel = activeMapEntry.isCustom ? 'custom' : activeMapEntry.name.replace(/\s+/g, '-');
+    const ampLabel = settings.amplitude.toFixed(2).replace('.', 'p');
+    const exportName = `${currentStlName}_${texLabel}_amp${ampLabel}.stl`;
+    exportSTL(finalGeometry, exportName);
 
     setProgress(1.0, 'Done!');
     setTimeout(() => {

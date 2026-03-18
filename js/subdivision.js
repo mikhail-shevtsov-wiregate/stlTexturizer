@@ -60,7 +60,7 @@ export async function subdivide(geometry, maxEdgeLength, onProgress, faceWeights
     if (!changed || safetyCapHit) break;
   }
 
-  return { geometry: toNonIndexed(positions, normals, weights, currentIndices), safetyCapHit };
+  return { geometry: toNonIndexed(positions, normals, weights, currentIndices, currentFaceExcluded), safetyCapHit };
 }
 
 // ── One subdivision pass ──────────────────────────────────────────────────────
@@ -295,13 +295,20 @@ function toIndexed(geometry, nonIndexedWeights = null) {
 
 // ── Indexed → non-indexed ────────────────────────────────────────────────────
 
-function toNonIndexed(positions, normals, weights, indices) {
+function toNonIndexed(positions, normals, weights, indices, faceExcluded = null) {
   const triCount  = indices.length / 3;
   const posArray  = new Float32Array(triCount * 9);
   const nrmArray  = new Float32Array(triCount * 9);
-  const wgtArray  = weights ? new Float32Array(triCount * 3) : null;
+  const wgtArray  = (faceExcluded || weights) ? new Float32Array(triCount * 3) : null;
 
   for (let t = 0; t < triCount; t++) {
+    // Use the binary faceExcluded flag (tracked accurately through subdivision)
+    // rather than the interpolated weights[vidx].  The interpolated weights can
+    // be pushed to 1.0 on included faces via the MAX-merge in toIndexed: if an
+    // included face shares edges with TWO excluded neighbours all three of its
+    // vertices are merged to weight 1.0, making its average exceed the 0.99
+    // threshold and falsely excluding it from displacement.
+    const faceW = faceExcluded ? (faceExcluded[t] ? 1.0 : 0.0) : null;
     for (let v = 0; v < 3; v++) {
       const vidx = indices[t * 3 + v];
       posArray[t * 9 + v * 3]     = positions[vidx * 3];
@@ -312,7 +319,7 @@ function toNonIndexed(positions, normals, weights, indices) {
       nrmArray[t * 9 + v * 3 + 1] = normals[vidx * 3 + 1];
       nrmArray[t * 9 + v * 3 + 2] = normals[vidx * 3 + 2];
 
-      if (wgtArray) wgtArray[t * 3 + v] = weights[vidx];
+      if (wgtArray) wgtArray[t * 3 + v] = faceW !== null ? faceW : weights[vidx];
     }
   }
 

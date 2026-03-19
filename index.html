@@ -132,8 +132,8 @@
         </div>
         <div class="form-row slider-row">
           <label for="seam-blend" data-i18n="labels.seamBlend" data-i18n-title="tooltips.seamBlend" title="Softens the hard seam where projection faces meet. Effective for Cubic and Cylindrical modes.">Seam Blend ⓘ</label>
-          <input type="range" id="seam-blend" min="0" max="1" step="0.01" value="0.20" />
-          <input type="number" class="val" id="seam-blend-val" value="0.20" min="0" max="1" step="0.01" />
+          <input type="range" id="seam-blend" min="0" max="1" step="0.01" value="1" />
+          <input type="number" class="val" id="seam-blend-val" value="1" min="0" max="1" step="0.01" />
         </div>
       </section>
 
@@ -147,6 +147,14 @@
         </div>
         <div id="amplitude-warning" class="amplitude-warning hidden" data-i18n="warnings.amplitudeOverlap">
           ⚠ Amplitude exceeds 10% of the smallest model dimension — geometry overlaps may occur in the exported STL.
+        </div>
+        <div class="form-row">
+          <label class="checkbox-label" for="symmetric-displacement"
+            data-i18n-title="tooltips.symmetricDisplacement"
+            title="When on, 50% grey = no displacement; white pushes out, black pushes in. Keeps part volume roughly constant.">
+            <input type="checkbox" id="symmetric-displacement" />
+            <span data-i18n="labels.symmetricDisplacement">Symmetric displacement ⓘ</span>
+          </label>
         </div>
       </section>
 

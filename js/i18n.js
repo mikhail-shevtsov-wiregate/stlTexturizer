@@ -92,6 +92,10 @@ export const TRANSLATIONS = {
     'excl.hintExclude':              'Excluded surfaces appear orange and will not receive displacement during export.',
     'excl.hintInclude':              'Selected surfaces appear green and will be the only ones to receive displacement during export.',
 
+    // Symmetric displacement
+    'labels.symmetricDisplacement':  'Symmetric displacement \u24d8',
+    'tooltips.symmetricDisplacement':'When on, 50% grey = no displacement; white pushes out, black pushes in. Keeps part volume roughly constant.',
+
     // Amplitude overlap warning
     'warnings.amplitudeOverlap':     '\u26a0 Amplitude exceeds 10% of the smallest model dimension \u2014 geometry overlaps may occur in the exported STL.',
 
@@ -221,8 +225,12 @@ export const TRANSLATIONS = {
     'excl.hintExclude':              'Ausgeschlossene Fl\u00e4chen erscheinen orange und erhalten beim Export keine Verschiebung.',
     'excl.hintInclude':              'Ausgew\u00e4hlte Fl\u00e4chen erscheinen gr\u00fcn und sind die einzigen, die beim Export eine Verschiebung erhalten.',
 
+    // Symmetric displacement
+    'labels.symmetricDisplacement':  'Symmetrische Verschiebung \u24d8',
+    'tooltips.symmetricDisplacement':'Wenn aktiv: 50% Grau = keine Verschiebung; Weiß nach außen, Schwarz nach innen. H\u00e4lt das Volumen des Teils in etwa konstant.',
+
     // Amplitude overlap warning
-    'warnings.amplitudeOverlap':     '\u26a0 Amplitude überschreitet 10% der kleinsten Modellabmessung \u2014 beim Export k\u00f6nnen Geometrie\u00fcberschneidungen auftreten.',
+    'warnings.amplitudeOverlap':     '\u26a0 Amplitude \u00fcberschreitet 10% der kleinsten Modellabmessung \u2014 beim Export k\u00f6nnen Geometrie\u00fcberschneidungen auftreten.',
 
     // Export section
     'sections.export':               'Export \u24d8',

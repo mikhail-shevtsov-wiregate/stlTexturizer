@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { computeUV, getDominantCubicAxis } from './mapping.js';
+import { computeUV, getDominantCubicAxis, getCubicBlendWeights } from './mapping.js';
 
 /**
  * Apply displacement to every vertex of a non-indexed BufferGeometry.
@@ -7,7 +7,8 @@ import { computeUV, getDominantCubicAxis } from './mapping.js';
  * For each vertex:
  *   1. Compute UV with the same math used in the GLSL preview shader (mapping.js).
  *   2. Bilinear-sample the greyscale ImageData at that UV.
- *   3. Move the vertex along its normal by:  grey * amplitude
+ *   3. Move the vertex along its normal by:  (grey − 0.5) × 2 × amplitude
+ *      so 50% grey = no displacement, white = outward, black = inward.
  *
  * @param {THREE.BufferGeometry} geometry  – non-indexed (from subdivide())
  * @param {ImageData}            imageData – raw pixel data from Canvas2D
@@ -113,24 +114,21 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     const faceMasked = angleMasked;
     if (userExcluded && userExcludedFaces) userExcludedFaces[t / 3] = 1;
 
-    // For cubic mapping: assign this face's area to its single dominant zone (argmax).
-    // Seam-edge vertices that border two zones still accumulate proportional blending
-    // because those two different adjacent faces each contribute to their own zone.
-    // Using argmax (instead of all-three-components) ensures that a face at exactly 45°
-    // picks one projection consistently, eliminating the double-texture artefact.
+    // For cubic mapping: distribute this face's area across projection zones
+    // proportionally to its blend weights.  When blend=0, getCubicBlendWeights
+    // returns a one-hot vector (same as the old argmax), preserving sharp seams.
+    // When blend>0, faces near a zone boundary contribute partial area to
+    // adjacent zones, creating a smooth multi-vertex-wide gradient that matches
+    // the preview shader.  The old single-zone approach only blended at the
+    // one-vertex-wide boundary, leaving an abrupt seam in the export.
     let czX = 0, czY = 0, czZ = 0;
     if (settings.mappingMode === 6 && faceArea > 1e-12) {
-      switch (getDominantCubicAxis(faceNrm)) {
-        case 'x':
-          czX = faceArea;
-          break;
-        case 'y':
-          czY = faceArea;
-          break;
-        default:
-          czZ = faceArea;
-          break;
-      }
+      const cubicBlend = settings.mappingBlend ?? 0;
+      const unitFaceNrm = { x: faceNrm.x / faceArea, y: faceNrm.y / faceArea, z: faceNrm.z / faceArea };
+      const w = getCubicBlendWeights(unitFaceNrm, cubicBlend);
+      czX = w.x * faceArea;
+      czY = w.y * faceArea;
+      czZ = w.z * faceArea;
     }
 
     for (let v = 0; v < 3; v++) {
@@ -146,7 +144,7 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
       } else {
         smoothNrmMap.set(k, [tmpNrm.x * faceArea, tmpNrm.y * faceArea, tmpNrm.z * faceArea]);
       }
-      if (czX > 0 || czY > 0 || czZ > 0) {
+      if (czX > 1e-12 || czY > 1e-12 || czZ > 1e-12) {
         const za = zoneAreaMap.get(k);
         if (za) { za[0] += czX; za[1] += czY; za[2] += czZ; }
         else { zoneAreaMap.set(k, [czX, czY, czZ]); }
@@ -252,7 +250,8 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     const isSealedBoundary = !isFaceExcluded && excludedPosSet && excludedPosSet.has(k);
     const mf         = maskedFracMap.get(k) || [0, 1];
     const maskedFrac = mf[1] > 0 ? mf[0] / mf[1] : 0;
-    const disp = (isFaceExcluded || isSealedBoundary) ? 0 : (1 - maskedFrac) * grey * settings.amplitude;
+    const centeredGrey = settings.symmetricDisplacement ? (grey - 0.5) * 2.0 : grey;
+    const disp = (isFaceExcluded || isSealedBoundary) ? 0 : (1 - maskedFrac) * centeredGrey * settings.amplitude;
 
     const newX = tmpPos.x + sn[0] * disp;
     const newY = tmpPos.y + sn[1] * disp;

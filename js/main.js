@@ -50,7 +50,8 @@ const settings = {
   lockScale:     true,
   bottomAngleLimit: 5,
   topAngleLimit:    0,
-  mappingBlend:     0.2,
+  mappingBlend:     1,
+  symmetricDisplacement: false,
 };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -99,6 +100,7 @@ const bottomAngleLimitVal    = document.getElementById('bottom-angle-limit-val')
 const topAngleLimitVal       = document.getElementById('top-angle-limit-val');
 const seamBlendSlider        = document.getElementById('seam-blend');
 const seamBlendVal           = document.getElementById('seam-blend-val');
+const symmetricDispToggle    = document.getElementById('symmetric-displacement');
 
 // ── Exclusion panel DOM refs ──────────────────────────────────────────────────
 const exclBrushBtn        = document.getElementById('excl-brush-btn');
@@ -310,6 +312,10 @@ function wireEvents() {
   linkSlider(bottomAngleLimitSlider, bottomAngleLimitVal, v => { settings.bottomAngleLimit = v; return v; });
   linkSlider(topAngleLimitSlider,    topAngleLimitVal,    v => { settings.topAngleLimit    = v; return v; });
   linkSlider(seamBlendSlider,        seamBlendVal,        v => { settings.mappingBlend     = v; return v.toFixed(2); });
+  symmetricDispToggle.addEventListener('change', () => {
+    settings.symmetricDisplacement = symmetricDispToggle.checked;
+    updatePreview();
+  });
 
   // ── Export ──
   exportBtn.addEventListener('click', () => {
@@ -723,8 +729,8 @@ async function handleSTL(file) {
       slider.value = value;
       valEl.value = value;
     };
-    settings.scaleU  = 1; scaleUSlider.value = scaleToPos(1); scaleUVal.value = 1;
-    settings.scaleV  = 1; scaleVSlider.value = scaleToPos(1); scaleVVal.value = 1;
+    settings.scaleU  = 0.5; scaleUSlider.value = scaleToPos(0.5); scaleUVal.value = 0.5;
+    settings.scaleV  = 0.5; scaleVSlider.value = scaleToPos(0.5); scaleVVal.value = 0.5;
     settings.offsetU = 0; resetVal(offsetUSlider, offsetUVal, 0);
     settings.offsetV = 0; resetVal(offsetVSlider, offsetVVal, 0);
     triLimitWarning.classList.add('hidden');

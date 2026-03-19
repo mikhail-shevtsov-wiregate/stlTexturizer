@@ -55,6 +55,7 @@ const fragmentShader = /* glsl */`
   uniform float     bottomAngleLimit; // degrees from horizontal; 0 = disabled
   uniform float     topAngleLimit;    // degrees from horizontal; 0 = disabled
   uniform float     mappingBlend;     // 0 = sharp seams, 1 = fully blended
+  uniform int       symmetricDisplacement; // 1 = remap [0,1]→[-1,1] so 50% grey = no disp
 
   varying vec3 vModelPos;
   varying vec3 vModelNormal;
@@ -193,6 +194,7 @@ const fragmentShader = /* glsl */`
     // Flip normal for back faces so flipped-winding geometry still lights correctly.
     vec3 N = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
     float h = getHeight();
+    if (symmetricDisplacement == 1) h = h * 2.0 - 1.0; // remap [0,1]→[-1,1]: 0.5 grey = zero
 
     // ── Surface angle masking (FDM: suppress texture on near-horizontal faces) ────
     // Use a 15° smoothstep fade above the threshold so the bump tapers gradually
@@ -204,7 +206,7 @@ const fragmentShader = /* glsl */`
       maskBlend = min(maskBlend, smoothstep(bottomAngleLimit, bottomAngleLimit + FADE, surfaceAngle));
     if (vModelNormal.z >= 0.0 && topAngleLimit >= 1.0)
       maskBlend = min(maskBlend, smoothstep(topAngleLimit, topAngleLimit + FADE, surfaceAngle));
-    h = mix(0.5, h, maskBlend); // blend toward neutral grey (zero-gradient → no bump)
+    h = mix(0.0, h, maskBlend); // blend toward neutral (zero-gradient → no bump)
 
     // ── Bump mapping via screen-space height derivatives ──────────────────
     float dhx = dFdx(h);
@@ -287,7 +289,8 @@ export function updateMaterial(material, displacementTexture, settings) {
   }
   u.bottomAngleLimit.value = settings.bottomAngleLimit ?? 5.0;
   u.topAngleLimit.value    = settings.topAngleLimit    ?? 0.0;
-  u.mappingBlend.value     = settings.mappingBlend     ?? 0.0;
+  u.mappingBlend.value            = settings.mappingBlend            ?? 0.0;
+  u.symmetricDisplacement.value   = settings.symmetricDisplacement   ? 1 : 0;
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -310,7 +313,8 @@ function buildUniforms(tex, settings) {
     boundsCenter:     { value: b.center.clone() },
     bottomAngleLimit: { value: settings.bottomAngleLimit ?? 5.0 },
     topAngleLimit:    { value: settings.topAngleLimit    ?? 0.0 },
-    mappingBlend:     { value: settings.mappingBlend     ?? 0.0 },
+    mappingBlend:             { value: settings.mappingBlend            ?? 0.0 },
+    symmetricDisplacement:    { value: settings.symmetricDisplacement   ? 1 : 0 },
   };
 }
 

@@ -59,6 +59,7 @@ const settings = {
 // ── Displacement preview state ────────────────────────────────────────────────
 let dispPreviewGeometry  = null;   // subdivided geometry with smoothNormal attribute
 let dispPreviewBusy      = false;  // true while async subdivision is running
+let dispPreviewParentMap = null;   // Int32Array: subdivided face → original face index
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
@@ -561,7 +562,15 @@ function pickTriangle(e) {
   _raycaster.setFromCamera(_canvasNDC(e), getCamera());
   const hits = _raycaster.intersectObject(mesh);
   const hit = getFrontFaceHit(hits, mesh);
-  return hit ? hit.faceIndex : -1;
+  if (!hit) return -1;
+  let fi = hit.faceIndex;
+  // When displacement preview is active the mesh uses the subdivided geometry,
+  // so the raycaster returns a subdivided face index.  Map it back to the
+  // original face index so that excludedFaces always stores original indices.
+  if (dispPreviewGeometry && mesh.geometry === dispPreviewGeometry && dispPreviewParentMap) {
+    fi = dispPreviewParentMap[fi];
+  }
+  return fi;
 }
 
 function paintAt(e) {
@@ -572,7 +581,11 @@ function paintAt(e) {
   const hit = getFrontFaceHit(hits, mesh);
   if (!hit) return;
 
-  const triIdx = hit.faceIndex;
+  // Map subdivided → original face index when displacement preview is active
+  let triIdx = hit.faceIndex;
+  if (dispPreviewGeometry && mesh.geometry === dispPreviewGeometry && dispPreviewParentMap) {
+    triIdx = dispPreviewParentMap[triIdx];
+  }
 
   if (brushIsRadius) {
     const hitPt    = hits[0].point;
@@ -607,6 +620,12 @@ function refreshExclusionOverlay() {
   exclCount.textContent = selectionMode
     ? t(n === 1 ? 'excl.faceSelected' : 'excl.facesSelected', { n: n.toLocaleString() })
     : t(n === 1 ? 'excl.faceExcluded' : 'excl.facesExcluded', { n: n.toLocaleString() });
+
+  // Update the faceMask attribute on the active preview geometry so the shader
+  // reflects user-painted exclusions in real time.
+  const activeGeo = (settings.useDisplacement && dispPreviewGeometry)
+    ? dispPreviewGeometry : currentGeometry;
+  updateFaceMask(activeGeo);
 }
 
 function updateBrushCursor(e) {
@@ -865,6 +884,176 @@ function checkAmplitudeWarning() {
   amplitudeVal.classList.toggle('amp-danger', danger);
 }
 
+/**
+ * Set (or update) the `faceMask` vertex attribute on a geometry.
+ * 1.0 = textured, 0.0 = user-excluded.  Angle masking stays in the shader.
+ *
+ * Always creates a fresh Float32BufferAttribute so that Three.js allocates a
+ * new WebGL buffer and uploads the current data.  This avoids subtle buffer-
+ * caching issues where in-place array edits + needsUpdate could keep stale
+ * GPU data on some drivers.
+ */
+function updateFaceMask(geometry) {
+  if (!geometry) return;
+  const posCount = geometry.attributes.position.count;
+  const triCount = posCount / 3;
+  const maskArr = new Float32Array(posCount);
+
+  // Fast path: no user exclusion active
+  if (excludedFaces.size === 0 && !selectionMode) {
+    maskArr.fill(1.0);
+  } else {
+    const isDisp = (geometry === dispPreviewGeometry && dispPreviewParentMap);
+    for (let t = 0; t < triCount; t++) {
+      const origFace = isDisp ? dispPreviewParentMap[t] : t;
+      const excluded = selectionMode ? !excludedFaces.has(origFace) : excludedFaces.has(origFace);
+      const val = excluded ? 0.0 : 1.0;
+      maskArr[t * 3]     = val;
+      maskArr[t * 3 + 1] = val;
+      maskArr[t * 3 + 2] = val;
+    }
+  }
+
+  geometry.setAttribute('faceMask', new THREE.Float32BufferAttribute(maskArr, 1));
+
+  // Ensure faceNormal attribute exists (needed by shader for angle masking).
+  // For the original geometry normal == faceNormal; for subdivided geometry
+  // addFaceNormals() is called after subdivision, but guard here in case the
+  // attribute is still missing.
+  if (!geometry.attributes.faceNormal) {
+    addFaceNormals(geometry);
+  }
+}
+
+/**
+ * Build a mapping from each subdivided face to its nearest original face
+ * using a grid-accelerated nearest-centroid lookup, with face normal
+ * tiebreaking to prevent boundary faces from being mapped to the wrong
+ * original face (e.g. a subdivided face on a cube edge mapped to the
+ * adjacent face instead of the correct one).
+ */
+function buildParentFaceMap(subdivGeo) {
+  if (!triangleCentroids || !currentGeometry) return null;
+
+  const origPos = currentGeometry.attributes.position.array;
+  const origTriCount = currentGeometry.attributes.position.count / 3;
+  const subPos = subdivGeo.attributes.position.array;
+  const subTriCount = subdivGeo.attributes.position.count / 3;
+
+  // Precompute original face normals
+  const origNormals = new Float32Array(origTriCount * 3);
+  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3(), _fn = new THREE.Vector3();
+  for (let t = 0; t < origTriCount; t++) {
+    const b = t * 9;
+    _e1.set(origPos[b + 3] - origPos[b], origPos[b + 4] - origPos[b + 1], origPos[b + 5] - origPos[b + 2]);
+    _e2.set(origPos[b + 6] - origPos[b], origPos[b + 7] - origPos[b + 1], origPos[b + 8] - origPos[b + 2]);
+    _fn.crossVectors(_e1, _e2).normalize();
+    origNormals[t * 3] = _fn.x; origNormals[t * 3 + 1] = _fn.y; origNormals[t * 3 + 2] = _fn.z;
+  }
+
+  // Bounding box of original centroids
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < origTriCount; i++) {
+    const cx = triangleCentroids[i * 3], cy = triangleCentroids[i * 3 + 1], cz = triangleCentroids[i * 3 + 2];
+    if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+    if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+    if (cz < minZ) minZ = cz; if (cz > maxZ) maxZ = cz;
+  }
+  const pad = 1e-3;
+  minX -= pad; minY -= pad; minZ -= pad;
+  maxX += pad; maxY += pad; maxZ += pad;
+
+  const res = Math.max(4, Math.min(128, Math.ceil(Math.cbrt(origTriCount) * 2)));
+  const dx = (maxX - minX) / res || 1;
+  const dy = (maxY - minY) / res || 1;
+  const dz = (maxZ - minZ) / res || 1;
+
+  // Build spatial grid of original centroids
+  const grid = new Map();
+  const cellKey = (ix, iy, iz) => (ix * res + iy) * res + iz;
+  for (let i = 0; i < origTriCount; i++) {
+    const cx = triangleCentroids[i * 3], cy = triangleCentroids[i * 3 + 1], cz = triangleCentroids[i * 3 + 2];
+    const ix = Math.max(0, Math.min(res - 1, Math.floor((cx - minX) / dx)));
+    const iy = Math.max(0, Math.min(res - 1, Math.floor((cy - minY) / dy)));
+    const iz = Math.max(0, Math.min(res - 1, Math.floor((cz - minZ) / dz)));
+    const k = cellKey(ix, iy, iz);
+    const cell = grid.get(k);
+    if (cell) cell.push(i); else grid.set(k, [i]);
+  }
+
+  // For each subdivided face, find nearest original face by centroid distance
+  // with face-normal tiebreaking to resolve boundary ambiguity.
+  const parentMap = new Int32Array(subTriCount);
+  for (let st = 0; st < subTriCount; st++) {
+    const base = st * 9;
+    const sx = (subPos[base] + subPos[base + 3] + subPos[base + 6]) / 3;
+    const sy = (subPos[base + 1] + subPos[base + 4] + subPos[base + 7]) / 3;
+    const sz = (subPos[base + 2] + subPos[base + 5] + subPos[base + 8]) / 3;
+
+    // Subdivided face normal
+    _e1.set(subPos[base + 3] - subPos[base], subPos[base + 4] - subPos[base + 1], subPos[base + 5] - subPos[base + 2]);
+    _e2.set(subPos[base + 6] - subPos[base], subPos[base + 7] - subPos[base + 1], subPos[base + 8] - subPos[base + 2]);
+    _fn.crossVectors(_e1, _e2).normalize();
+    const snx = _fn.x, sny = _fn.y, snz = _fn.z;
+
+    const ix = Math.max(0, Math.min(res - 1, Math.floor((sx - minX) / dx)));
+    const iy = Math.max(0, Math.min(res - 1, Math.floor((sy - minY) / dy)));
+    const iz = Math.max(0, Math.min(res - 1, Math.floor((sz - minZ) / dz)));
+
+    let bestDist = Infinity, bestIdx = 0;
+    // Two-pass: prefer original faces whose normal aligns with the subdivided
+    // face (dot > 0.4 ≈ within ~66°), then among those pick the nearest
+    // centroid.  This prevents boundary faces at sharp seams (cube edges etc.)
+    // from being mapped to the adjacent face even when that face's centroid
+    // happens to be closer.  Falls back to pure nearest-centroid if no
+    // normal-matching candidate is found.
+    let bestDistAligned = Infinity, bestIdxAligned = -1;
+    for (let dix = -1; dix <= 1; dix++) {
+      for (let diy = -1; diy <= 1; diy++) {
+        for (let diz = -1; diz <= 1; diz++) {
+          const nix = ix + dix, niy = iy + diy, niz = iz + diz;
+          if (nix < 0 || nix >= res || niy < 0 || niy >= res || niz < 0 || niz >= res) continue;
+          const cell = grid.get(cellKey(nix, niy, niz));
+          if (!cell) continue;
+          for (const oi of cell) {
+            const cdx = sx - triangleCentroids[oi * 3];
+            const cdy = sy - triangleCentroids[oi * 3 + 1];
+            const cdz = sz - triangleCentroids[oi * 3 + 2];
+            const centroidDist = cdx * cdx + cdy * cdy + cdz * cdz;
+            if (centroidDist < bestDist) { bestDist = centroidDist; bestIdx = oi; }
+            const dot = snx * origNormals[oi * 3] + sny * origNormals[oi * 3 + 1] + snz * origNormals[oi * 3 + 2];
+            if (dot > 0.4 && centroidDist < bestDistAligned) {
+              bestDistAligned = centroidDist; bestIdxAligned = oi;
+            }
+          }
+        }
+      }
+    }
+
+    // If the local grid search didn't find a normal-aligned original face
+    // (common for sparse original meshes like cubes where face centroids
+    // are far from the grid cell of a corner-adjacent subdivided face),
+    // fall back to a brute-force scan over ALL original faces.
+    if (bestIdxAligned < 0) {
+      for (let oi = 0; oi < origTriCount; oi++) {
+        const cdx = sx - triangleCentroids[oi * 3];
+        const cdy = sy - triangleCentroids[oi * 3 + 1];
+        const cdz = sz - triangleCentroids[oi * 3 + 2];
+        const centroidDist = cdx * cdx + cdy * cdy + cdz * cdz;
+        if (centroidDist < bestDist) { bestDist = centroidDist; bestIdx = oi; }
+        const dot = snx * origNormals[oi * 3] + sny * origNormals[oi * 3 + 1] + snz * origNormals[oi * 3 + 2];
+        if (dot > 0.4 && centroidDist < bestDistAligned) {
+          bestDistAligned = centroidDist; bestIdxAligned = oi;
+        }
+      }
+    }
+    parentMap[st] = bestIdxAligned >= 0 ? bestIdxAligned : bestIdx;
+  }
+
+  return parentMap;
+}
+
 function updatePreview() {
   if (!currentGeometry || !currentBounds) return;
 
@@ -886,6 +1075,9 @@ function updatePreview() {
     ? dispPreviewGeometry
     : currentGeometry;
 
+  // Ensure faceMask attribute is current before rendering
+  updateFaceMask(activeGeo);
+
   if (!previewMaterial) {
     previewMaterial = createPreviewMaterial(activeMapEntry.texture, fullSettings);
     loadGeometry(activeGeo, previewMaterial);
@@ -897,6 +1089,35 @@ function updatePreview() {
 }
 
 // ── Displacement preview ──────────────────────────────────────────────────────
+
+/**
+ * Compute and set flat geometric face normals as a `faceNormal` attribute.
+ * Unlike the `normal` attribute (which may be smooth/interpolated after
+ * subdivision), `faceNormal` is always the true per-triangle normal computed
+ * from the cross product of the triangle's edges.  The shader uses this for
+ * angle-based masking so that smooth normals at edges don't cause mask bleeding.
+ */
+function addFaceNormals(geometry) {
+  const pos   = geometry.attributes.position.array;
+  const count = geometry.attributes.position.count;
+  const fn    = new Float32Array(count * 3);
+  const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), n  = new THREE.Vector3();
+  for (let i = 0; i < count; i += 3) {
+    vA.set(pos[i * 3],       pos[i * 3 + 1],       pos[i * 3 + 2]);
+    vB.set(pos[(i+1) * 3],   pos[(i+1) * 3 + 1],   pos[(i+1) * 3 + 2]);
+    vC.set(pos[(i+2) * 3],   pos[(i+2) * 3 + 1],   pos[(i+2) * 3 + 2]);
+    e1.subVectors(vB, vA);
+    e2.subVectors(vC, vA);
+    n.crossVectors(e1, e2).normalize();
+    for (let v = 0; v < 3; v++) {
+      fn[(i + v) * 3]     = n.x;
+      fn[(i + v) * 3 + 1] = n.y;
+      fn[(i + v) * 3 + 2] = n.z;
+    }
+  }
+  geometry.setAttribute('faceNormal', new THREE.Float32BufferAttribute(fn, 3));
+}
 
 /**
  * Compute area-weighted smooth normals for a non-indexed geometry and store
@@ -970,6 +1191,7 @@ async function toggleDisplacementPreview(enable) {
     // Revert to original geometry with bump-only shading.
     if (currentGeometry && previewMaterial) {
       updateMaterial(previewMaterial, activeMapEntry?.texture, { ...settings, bounds: currentBounds });
+      updateFaceMask(currentGeometry);
       setMeshGeometry(currentGeometry);
     }
     // Dispose the subdivided preview geometry (no longer on the mesh)
@@ -977,6 +1199,7 @@ async function toggleDisplacementPreview(enable) {
       dispPreviewGeometry.dispose();
       dispPreviewGeometry = null;
     }
+    dispPreviewParentMap = null;
     return;
   }
 
@@ -1003,10 +1226,15 @@ async function toggleDisplacementPreview(enable) {
     );
 
     addSmoothNormals(subdivided);
+    addFaceNormals(subdivided);
 
     // Dispose previous preview geometry if any
     if (dispPreviewGeometry) dispPreviewGeometry.dispose();
     dispPreviewGeometry = subdivided;
+
+    // Build mapping from subdivided faces → original faces for exclusion masking
+    dispPreviewParentMap = buildParentFaceMap(subdivided);
+    updateFaceMask(subdivided);
 
     // Force material recreation so it binds the new geometry with smoothNormal
     if (previewMaterial) {

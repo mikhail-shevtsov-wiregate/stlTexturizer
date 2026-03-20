@@ -153,31 +153,37 @@ const vertexShader = /* glsl */`
   precision highp float;
   ${sharedGLSL}
 
-  attribute vec3 smoothNormal;
+  attribute vec3  smoothNormal;
+  attribute vec3  faceNormal;
+  attribute float faceMask;
 
-  varying vec3 vModelPos;    // ORIGINAL model-space position → UV computation in fragment
-  varying vec3 vModelNormal; // model-space face normal       → stable UV blending
-  varying vec3 vViewPos;     // view-space position (possibly displaced) → TBN & specular
-  varying vec3 vNormal;      // view-space normal → lighting
+  varying vec3  vModelPos;    // ORIGINAL model-space position → UV computation in fragment
+  varying vec3  vModelNormal; // model-space face normal       → stable UV blending
+  varying vec3  vViewPos;     // view-space position (possibly displaced) → TBN & specular
+  varying vec3  vNormal;      // view-space normal → lighting
+  varying float vFaceMask;    // combined mask (angle + user exclusion)
 
   void main() {
     vec3 safeN = length(normal) > 1e-6 ? normalize(normal) : vec3(0.0, 0.0, 1.0);
+    // Use the true geometric face normal for angle masking so that
+    // smooth/interpolated normals from subdivision don't cause mask bleeding.
+    vec3 fN = length(faceNormal) > 1e-6 ? normalize(faceNormal) : safeN;
     vec3 pos = position;
 
+    // Surface angle masking — hard per-face cutoff using flat face normal
+    float surfaceAngle = degrees(acos(clamp(abs(fN.z), 0.0, 1.0)));
+    float angleMask = 1.0;
+    if (fN.z <  0.0 && bottomAngleLimit >= 1.0)
+      angleMask = min(angleMask, surfaceAngle > bottomAngleLimit ? 1.0 : 0.0);
+    if (fN.z >= 0.0 && topAngleLimit >= 1.0)
+      angleMask = min(angleMask, surfaceAngle > topAngleLimit ? 1.0 : 0.0);
+    float totalMask = angleMask * faceMask;
+    vFaceMask = totalMask;
+
     if (useDisplacement == 1) {
-      // Sample displacement texture using the same UV math as the fragment shader
       float h = computeHeightAtPoint(position, safeN, safeN);
       if (symmetricDisplacement == 1) h = h - 0.5;
-
-      // Surface angle masking (same logic as fragment shader)
-      float surfaceAngle = degrees(acos(clamp(abs(safeN.z), 0.0, 1.0)));
-      float maskBlend = 1.0;
-      float FADE = 15.0;
-      if (safeN.z <  0.0 && bottomAngleLimit >= 1.0)
-        maskBlend = min(maskBlend, smoothstep(bottomAngleLimit, bottomAngleLimit + FADE, surfaceAngle));
-      if (safeN.z >= 0.0 && topAngleLimit >= 1.0)
-        maskBlend = min(maskBlend, smoothstep(topAngleLimit, topAngleLimit + FADE, surfaceAngle));
-      h = mix(0.0, h, maskBlend);
+      h *= totalMask;
 
       // Displace along smooth normal so all copies of the same position
       // arrive at the same point (watertight, no cracks).
@@ -187,10 +193,10 @@ const vertexShader = /* glsl */`
 
     // Always pass the ORIGINAL position for UV computation in the fragment shader.
     vModelPos    = position;
-    vModelNormal = safeN;
+    vModelNormal = fN;
     vec4 mvPos   = modelViewMatrix * vec4(pos, 1.0);
     vViewPos     = mvPos.xyz;
-    vNormal      = normalize(normalMatrix * safeN);
+    vNormal      = normalize(normalMatrix * fN);
     gl_Position  = projectionMatrix * mvPos;
   }
 `;
@@ -199,10 +205,11 @@ const fragmentShader = /* glsl */`
   precision highp float;
   ${sharedGLSL}
 
-  varying vec3 vModelPos;
-  varying vec3 vModelNormal;
-  varying vec3 vViewPos;
-  varying vec3 vNormal;
+  varying vec3  vModelPos;
+  varying vec3  vModelNormal;
+  varying vec3  vViewPos;
+  varying vec3  vNormal;
+  varying float vFaceMask;
 
   // Fragment-only wrapper: compute face-stable projection normal via dFdx
   // then delegate to the shared height function.
@@ -220,19 +227,18 @@ const fragmentShader = /* glsl */`
     float h = getHeight();
     if (symmetricDisplacement == 1) h = h - 0.5;
 
-    // ── Surface angle masking ─────────────────────────────────────────────
-    float surfaceAngle = degrees(acos(clamp(abs(vModelNormal.z), 0.0, 1.0)));
-    float maskBlend = 1.0;
-    float FADE = 15.0;
-    if (vModelNormal.z <  0.0 && bottomAngleLimit >= 1.0)
-      maskBlend = min(maskBlend, smoothstep(bottomAngleLimit, bottomAngleLimit + FADE, surfaceAngle));
-    if (vModelNormal.z >= 0.0 && topAngleLimit >= 1.0)
-      maskBlend = min(maskBlend, smoothstep(topAngleLimit, topAngleLimit + FADE, surfaceAngle));
-    h = mix(0.0, h, maskBlend);
-
     // ── Bump mapping via screen-space height derivatives ──────────────────
+    // Compute derivatives on the RAW (unmasked) height so that screen-space
+    // 2×2 pixel quads spanning masked/unmasked boundaries don't produce
+    // large derivative spikes that bleed bump artifacts across the edge.
     float dhx = dFdx(h);
     float dhy = dFdy(h);
+
+    // ── Combined mask (angle + user exclusion) from vertex shader ────────
+    float maskBlend = vFaceMask;
+    h *= maskBlend;
+    dhx *= maskBlend;
+    dhy *= maskBlend;
 
     vec3 dp1 = dFdx(vViewPos);
     vec3 dp2 = dFdy(vViewPos);

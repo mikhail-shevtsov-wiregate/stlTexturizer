@@ -755,6 +755,12 @@ function setExclusionTool(tool) {
   if (!exclusionTool) {
     isPainting = false;
     getControls().enabled = true;
+    // Recompute boundary falloff now that masking is done
+    if (_falloffDirty && currentGeometry) {
+      const activeGeo = (settings.useDisplacement && dispPreviewGeometry)
+        ? dispPreviewGeometry : currentGeometry;
+      updateFaceMask(activeGeo);
+    }
   }
 }
 
@@ -1482,7 +1488,9 @@ function updateFaceMask(geometry) {
     addFaceNormals(geometry);
   }
 
-  if (_falloffDirty || geometry !== _falloffGeometry) {
+  // Skip expensive falloff recomputation while actively masking;
+  // it will be recalculated when the masking tool is deactivated.
+  if (!exclusionTool && (_falloffDirty || geometry !== _falloffGeometry)) {
     computeBoundaryFalloffAttr(geometry, maskArr);
     computeBoundaryEdges(geometry, maskArr);
     _falloffDirty = false;
